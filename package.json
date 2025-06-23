@@ -1,0 +1,28 @@
+{
+  "name": "moopilot",
+  "version": "0.1.0",
+  "description": "MCP server for Remember The Milk API with OAuth authentication",
+  "main": "build/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node build/index.js",
+    "dev": "tsx index.ts",
+    "dev:stdio": "tsx index.ts --stdio"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "AGPL-3.0-only",
+  "packageManager": "pnpm@10.12.1",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.13.1",
+    "express": "^5.1.0",
+    "fast-xml-parser": "^5.2.5"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.0.3",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3"
+  }
+}
