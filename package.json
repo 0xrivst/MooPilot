@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node build/index.js",
-    "dev": "tsx index.ts",
+    "dev": "tsx src/index.ts",
     "dev:stdio": "tsx index.ts --stdio"
   },
   "keywords": [],
@@ -16,10 +16,12 @@
   "packageManager": "pnpm@10.12.1",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.13.1",
+    "cors": "^2.8.5",
     "express": "^5.1.0",
     "fast-xml-parser": "^5.2.5"
   },
   "devDependencies": {
+    "@types/cors": "^2.8.19",
     "@types/express": "^5.0.3",
     "@types/node": "^24.0.3",
     "tsx": "^4.20.3",
