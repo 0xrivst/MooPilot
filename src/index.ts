@@ -762,16 +762,4 @@ app.listen(port, () => {
   console.log(`OAuth authorization at http://localhost:${port}/authorize`);
 });
 
-if (process.argv.includes("--stdio")) {
-  const stdioServer = new McpServer({
-    name: "remember-the-milk",
-    version: "1.0.0",
-  });
-
-  registerRTMTools(stdioServer);
-
-  const transport = new StdioServerTransport();
-  stdioServer.connect(transport).catch(console.error);
-}
-
-module.exports = app;
+export default app;
