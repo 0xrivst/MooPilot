@@ -773,3 +773,5 @@ if (process.argv.includes("--stdio")) {
   const transport = new StdioServerTransport();
   stdioServer.connect(transport).catch(console.error);
 }
+
+module.exports = app;
