@@ -16,22 +16,17 @@ You should have received a copy of the GNU Affero General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 */
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-  Tool,
-} from "@modelcontextprotocol/sdk/types.js";
 import cors from "cors";
 import crypto from "crypto";
-import express from "express";
-import { RememberTheMilkAPI } from "./RememberTheMilkAPI";
-import wellKnown from "./routes/well-known";
-import { getBaseUrl } from "./util";
+import express, { Request, Response } from "express";
+import { z } from "zod";
+import { RememberTheMilkAPI } from "./RememberTheMilkAPI.js";
+import wellKnown from "./routes/well-known.js";
+import { getBaseUrl } from "./util.js";
 
 interface StoredToken {
   token: string;
@@ -41,6 +36,18 @@ interface StoredToken {
   clientId: string;
   createdAt: Date;
   expiresAt: Date;
+}
+
+interface AuthObject {
+  token: string;
+  clientId: string;
+  scopes: string[];
+  rtmToken: string;
+  rtmUser: any;
+}
+
+interface AuthenticatedRequest extends Request {
+  auth?: AuthObject;
 }
 
 const authorizationCodes = new Map<string, any>();
@@ -57,7 +64,7 @@ app.use(cors());
 
 app.use("/.well-known", wellKnown);
 
-app.get("/authorize", async (req, res) => {
+app.get("/authorize", async (req: Request, res: Response) => {
   const {
     client_id,
     redirect_uri,
@@ -69,6 +76,7 @@ app.get("/authorize", async (req, res) => {
 
   if (response_type !== "code") {
     res.status(400).send("Only authorization code flow is supported");
+    return;
   }
 
   try {
@@ -130,7 +138,7 @@ app.get("/authorize", async (req, res) => {
   }
 });
 
-app.get("/callback", async (req, res) => {
+app.get("/callback", async (req: Request, res: Response) => {
   const { auth_id } = req.query;
 
   if (!auth_id || typeof auth_id !== "string") {
@@ -141,6 +149,7 @@ app.get("/callback", async (req, res) => {
   const authData = pendingAuths.get(auth_id);
   if (!authData) {
     res.status(400).send("Invalid or expired auth_id");
+    return;
   }
 
   try {
@@ -178,7 +187,7 @@ app.get("/callback", async (req, res) => {
   }
 });
 
-app.post("/token", async (req, res) => {
+app.post("/token", async (req: Request, res: Response) => {
   const { grant_type, code, redirect_uri, code_verifier, client_id } = req.body;
 
   if (grant_type !== "authorization_code") {
@@ -248,7 +257,18 @@ app.post("/token", async (req, res) => {
   });
 });
 
-async function authenticateToken(req: any, res: any, rpcId: any = null) {
+interface AuthResult {
+  success: boolean;
+  response?: Response;
+  tokenData?: StoredToken;
+  authObject?: AuthObject;
+}
+
+async function authenticateToken(
+  req: AuthenticatedRequest,
+  res: Response,
+  rpcId: any = null
+): Promise<AuthResult> {
   const authHeader = req.headers["authorization"] || "";
   const token = authHeader.replace(/^Bearer\s+/i, "").trim();
   const baseUrl = getBaseUrl(req);
@@ -256,44 +276,41 @@ async function authenticateToken(req: any, res: any, rpcId: any = null) {
   if (!token) {
     const wwwAuthHeader = `Bearer realm="RTM MCP Server", resource_metadata_endpoint="${baseUrl}/.well-known/oauth-protected-resource"`;
 
-    return {
-      success: false,
-      response: res
-        .status(401)
-        .header("WWW-Authenticate", wwwAuthHeader)
-        .json({
-          jsonrpc: "2.0",
-          error: { code: -32000, message: "Missing Bearer token" },
-          id: rpcId,
-        }),
-    };
+    res
+      .status(401)
+      .header("WWW-Authenticate", wwwAuthHeader)
+      .json({
+        jsonrpc: "2.0",
+        error: { code: -32000, message: "Missing Bearer token" },
+        id: rpcId,
+      });
+
+    return { success: false };
   }
 
   const tokenData = accessTokens.get(token);
   if (!tokenData) {
-    return {
-      success: false,
-      response: res.status(403).json({
-        jsonrpc: "2.0",
-        error: { code: -32001, message: "Invalid or expired token" },
-        id: rpcId,
-      }),
-    };
+    res.status(403).json({
+      jsonrpc: "2.0",
+      error: { code: -32001, message: "Invalid or expired token" },
+      id: rpcId,
+    });
+
+    return { success: false };
   }
 
   if (new Date() > tokenData.expiresAt) {
     accessTokens.delete(token);
-    return {
-      success: false,
-      response: res.status(403).json({
-        jsonrpc: "2.0",
-        error: { code: -32001, message: "Token expired" },
-        id: rpcId,
-      }),
-    };
+    res.status(403).json({
+      jsonrpc: "2.0",
+      error: { code: -32001, message: "Token expired" },
+      id: rpcId,
+    });
+
+    return { success: false };
   }
 
-  const authObject = {
+  const authObject: AuthObject = {
     token: token,
     clientId: tokenData.clientId,
     scopes: tokenData.scopes,
@@ -308,15 +325,9 @@ async function authenticateToken(req: any, res: any, rpcId: any = null) {
   };
 }
 
-const mcpServer = new Server({
+const mcpServer = new McpServer({
   name: "Remember The Milk MCP",
   version: "0.1.0",
-  instructions: `This server provides access to Remember The Milk tasks. Available tools:
-  - rtm_get_lists: Get all your RTM lists
-  - rtm_get_tasks: Get tasks from RTM (optionally filtered by list)
-  - rtm_add_task: Add a new task to RTM
-  - rtm_delete_task: Delete a task from RTM
-  - rtm_set_priority: Change task priority`,
 });
 
 const transports: { [key: string]: any } = {};
@@ -324,7 +335,7 @@ const pendingTransports: { [key: string]: any } = {};
 
 async function createAndConnectTransport(
   sessionId: string,
-  mcpServer: McpServer,
+  server: McpServer,
   transports: any,
   label: string
 ): Promise<any> {
@@ -340,9 +351,9 @@ async function createAndConnectTransport(
     },
   });
 
-  transport.sessionId = sessionId;
+  (transport as any).sessionId = sessionId;
 
-  transport.onclose = () => {
+  (transport as any).onclose = () => {
     if (transports[sessionId]) {
       delete transports[sessionId];
     }
@@ -352,7 +363,7 @@ async function createAndConnectTransport(
   transports[sessionId] = transport;
 
   try {
-    await mcpServer.connect(transport);
+    await server.connect(transport);
   } catch (error) {
     delete pendingTransports[sessionId];
     delete transports[sessionId];
@@ -362,122 +373,47 @@ async function createAndConnectTransport(
   return transport;
 }
 
-function registerTools(server: Server) {
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
-    const tools: Tool[] = [
-      {
-        name: "rtm_get_lists",
-        description: "Get all lists from Remember The Milk",
-        inputSchema: {
-          type: "object",
-          properties: {},
-        },
-      },
-      {
-        name: "rtm_get_tasks",
-        description: "Get tasks from Remember The Milk",
-        inputSchema: {
-          type: "object",
-          properties: {
-            list_id: {
-              type: "string",
-              description: "Optional list ID to filter tasks",
-            },
-            last_sync: {
-              type: "string",
-              description:
-                "Optional last sync timestamp for incremental updates",
-            },
-          },
-        },
-      },
-      {
-        name: "rtm_add_task",
-        description: "Add a new task to Remember The Milk",
-        inputSchema: {
-          type: "object",
-          properties: {
-            list_id: {
-              type: "string",
-              description: "List ID to add the task to",
-            },
-            name: {
-              type: "string",
-              description: "Name of the task",
-            },
-          },
-          required: ["list_id", "name"],
-        },
-      },
-      {
-        name: "rtm_delete_task",
-        description: "Delete a task from Remember The Milk",
-        inputSchema: {
-          type: "object",
-          properties: {
-            list_id: {
-              type: "string",
-              description: "List ID containing the task",
-            },
-            taskseries_id: {
-              type: "string",
-              description: "Task series ID",
-            },
-            task_id: {
-              type: "string",
-              description: "Task ID",
-            },
-          },
-          required: ["list_id", "taskseries_id", "task_id"],
-        },
-      },
-      {
-        name: "rtm_set_priority",
-        description: "Set the priority of a task",
-        inputSchema: {
-          type: "object",
-          properties: {
-            list_id: {
-              type: "string",
-              description: "List ID containing the task",
-            },
-            taskseries_id: {
-              type: "string",
-              description: "Task series ID",
-            },
-            task_id: {
-              type: "string",
-              description: "Task ID",
-            },
-            priority: {
-              type: "string",
-              enum: ["1", "2", "3", "N"],
-              description: "Priority level (1=High, 2=Medium, 3=Low, N=None)",
-            },
-          },
-          required: ["list_id", "taskseries_id", "task_id", "priority"],
-        },
-      },
-    ];
+const GetListsSchema = z.object({});
 
-    return { tools };
-  });
+const GetTasksSchema = z.object({
+  list_id: z.string().optional().describe("Optional list ID to filter tasks"),
+  last_sync: z
+    .string()
+    .optional()
+    .describe("Optional last sync timestamp for incremental updates"),
+});
 
-  server.setRequestHandler(
-    CallToolRequestSchema,
-    async (request, { authInfo }) => {
-      const { name, arguments: args } = request.params;
+const AddTaskSchema = z.object({
+  list_id: z.string().describe("List ID to add the task to"),
+  name: z.string().describe("Name of the task"),
+});
 
-      const rtmToken = (authInfo as any)?.rtmToken;
+const DeleteTaskSchema = z.object({
+  list_id: z.string().describe("List ID containing the task"),
+  taskseries_id: z.string().describe("Task series ID"),
+  task_id: z.string().describe("Task ID"),
+});
+
+const SetPrioritySchema = z.object({
+  list_id: z.string().describe("List ID containing the task"),
+  taskseries_id: z.string().describe("Task series ID"),
+  task_id: z.string().describe("Task ID"),
+  priority: z
+    .enum(["1", "2", "3", "N"])
+    .describe("Priority level (1=High, 2=Medium, 3=Low, N=None)"),
+});
+
+function registerRTMTools(server: McpServer) {
+  server.registerTool(
+    "rtm_get_lists",
+    {
+      description: "Get all lists from Remember The Milk",
+      inputSchema: GetListsSchema.shape,
+    },
+    async (args: z.infer<typeof GetListsSchema>, context: any) => {
+      const rtmToken = context?.rtmToken;
       if (!rtmToken) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "Error: Not authenticated with Remember The Milk",
-            },
-          ],
-        };
+        throw new Error("Not authenticated with Remember The Milk");
       }
 
       const rtmApi = new RememberTheMilkAPI({
@@ -486,127 +422,177 @@ function registerTools(server: Server) {
         authToken: rtmToken,
       });
 
-      try {
-        switch (name) {
-          case "rtm_get_lists": {
-            const lists = await rtmApi.getLists();
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: JSON.stringify(lists, null, 2),
-                },
-              ],
-            };
-          }
+      const lists = await rtmApi.getLists();
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(lists, null, 2),
+          },
+        ],
+      };
+    }
+  );
 
-          case "rtm_get_tasks": {
-            const tasks = await rtmApi.getTasks(args.list_id, args.last_sync);
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: JSON.stringify(tasks, null, 2),
-                },
-              ],
-            };
-          }
-
-          case "rtm_add_task": {
-            const timeline = await rtmApi.createTimeline();
-            const result = await rtmApi.addTask(
-              args.list_id,
-              args.name,
-              timeline
-            );
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `Task added successfully!\n${JSON.stringify(
-                    result,
-                    null,
-                    2
-                  )}`,
-                },
-              ],
-            };
-          }
-
-          case "rtm_delete_task": {
-            const timeline = await rtmApi.createTimeline();
-            const result = await rtmApi.deleteTask(
-              args.list_id,
-              args.taskseries_id,
-              args.task_id,
-              timeline
-            );
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `Task deleted successfully!\n${JSON.stringify(
-                    result,
-                    null,
-                    2
-                  )}`,
-                },
-              ],
-            };
-          }
-
-          case "rtm_set_priority": {
-            const timeline = await rtmApi.createTimeline();
-            const result = await rtmApi.setPriority(
-              args.list_id,
-              args.taskseries_id,
-              args.task_id,
-              args.priority,
-              timeline
-            );
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `Priority updated successfully!\n${JSON.stringify(
-                    result,
-                    null,
-                    2
-                  )}`,
-                },
-              ],
-            };
-          }
-
-          default:
-            throw new Error(`Unknown tool: ${name}`);
-        }
-      } catch (error) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Error: ${
-                error instanceof Error ? error.message : String(error)
-              }`,
-            },
-          ],
-        };
+  server.registerTool(
+    "rtm_get_tasks",
+    {
+      description: "Get tasks from Remember The Milk",
+      inputSchema: GetTasksSchema.shape,
+    },
+    async (args: z.infer<typeof GetTasksSchema>, context: any) => {
+      const rtmToken = context?.rtmToken;
+      if (!rtmToken) {
+        throw new Error("Not authenticated with Remember The Milk");
       }
+
+      const rtmApi = new RememberTheMilkAPI({
+        apiKey: process.env.RTM_API_KEY!,
+        sharedSecret: process.env.RTM_SHARED_SECRET!,
+        authToken: rtmToken,
+      });
+
+      const tasks = await rtmApi.getTasks(args.list_id, args.last_sync);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(tasks, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
+  server.registerTool(
+    "rtm_add_task",
+    {
+      description: "Add a new task to Remember The Milk",
+      inputSchema: AddTaskSchema.shape,
+    },
+    async (args: z.infer<typeof AddTaskSchema>, context: any) => {
+      const rtmToken = context?.rtmToken;
+      if (!rtmToken) {
+        throw new Error("Not authenticated with Remember The Milk");
+      }
+
+      const rtmApi = new RememberTheMilkAPI({
+        apiKey: process.env.RTM_API_KEY!,
+        sharedSecret: process.env.RTM_SHARED_SECRET!,
+        authToken: rtmToken,
+      });
+
+      const timeline = await rtmApi.createTimeline();
+      const result = await rtmApi.addTask(args.list_id, args.name, timeline);
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Task added successfully!\n${JSON.stringify(
+              result,
+              null,
+              2
+            )}`,
+          },
+        ],
+      };
+    }
+  );
+
+  server.registerTool(
+    "rtm_delete_task",
+    {
+      description: "Delete a task from Remember The Milk",
+      inputSchema: DeleteTaskSchema.shape,
+    },
+    async (args: z.infer<typeof DeleteTaskSchema>, context: any) => {
+      const rtmToken = context?.rtmToken;
+      if (!rtmToken) {
+        throw new Error("Not authenticated with Remember The Milk");
+      }
+
+      const rtmApi = new RememberTheMilkAPI({
+        apiKey: process.env.RTM_API_KEY!,
+        sharedSecret: process.env.RTM_SHARED_SECRET!,
+        authToken: rtmToken,
+      });
+
+      const timeline = await rtmApi.createTimeline();
+      const result = await rtmApi.deleteTask(
+        args.list_id,
+        args.taskseries_id,
+        args.task_id,
+        timeline
+      );
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Task deleted successfully!\n${JSON.stringify(
+              result,
+              null,
+              2
+            )}`,
+          },
+        ],
+      };
+    }
+  );
+
+  server.registerTool(
+    "rtm_set_priority",
+    {
+      description: "Set the priority of a task",
+      inputSchema: SetPrioritySchema.shape,
+    },
+    async (args: z.infer<typeof SetPrioritySchema>, context: any) => {
+      const rtmToken = context?.rtmToken;
+      if (!rtmToken) {
+        throw new Error("Not authenticated with Remember The Milk");
+      }
+
+      const rtmApi = new RememberTheMilkAPI({
+        apiKey: process.env.RTM_API_KEY!,
+        sharedSecret: process.env.RTM_SHARED_SECRET!,
+        authToken: rtmToken,
+      });
+
+      const timeline = await rtmApi.createTimeline();
+      const result = await rtmApi.setPriority(
+        args.list_id,
+        args.taskseries_id,
+        args.task_id,
+        args.priority,
+        timeline
+      );
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Priority updated successfully!\n${JSON.stringify(
+              result,
+              null,
+              2
+            )}`,
+          },
+        ],
+      };
     }
   );
 }
 
-registerTools(mcpServer);
+registerRTMTools(mcpServer);
 
-app.post("/mcp", async (req, res) => {
+app.post("/mcp", async (req: AuthenticatedRequest, res: Response) => {
   const body = req.body;
   const rpcId = body && body.id !== undefined ? body.id : null;
 
-  // Authenticate the token
   const authResult = await authenticateToken(req, res, rpcId);
   if (!authResult.success) {
-    return authResult.response;
+    return;
   }
 
   req.auth = authResult.authObject;
@@ -617,7 +603,7 @@ app.post("/mcp", async (req, res) => {
     : clientSessionIdHeader;
 
   let transport;
-  let effectiveSessionId;
+  let effectiveSessionId: string;
 
   const isInitRequest = body && body.method === "initialize";
 
@@ -635,11 +621,12 @@ app.post("/mcp", async (req, res) => {
     transport = transports[actualClientSessionId];
     effectiveSessionId = actualClientSessionId;
   } else {
-    return res.status(400).json({
+    res.status(400).json({
       jsonrpc: "2.0",
       error: { code: -32003, message: "Bad Request: No valid session ID" },
       id: rpcId,
     });
+    return;
   }
 
   req.headers["mcp-session-id"] = effectiveSessionId;
@@ -666,37 +653,37 @@ app.post("/mcp", async (req, res) => {
   }
 });
 
-app.delete("/mcp", async (req, res) => {
+app.delete("/mcp", async (req: Request, res: Response) => {
   const sessionId = req.headers["mcp-session-id"];
 
-  if (sessionId && transports[sessionId]) {
-    delete transports[sessionId];
+  if (sessionId && transports[sessionId as string]) {
+    delete transports[sessionId as string];
     res.status(204).end();
   } else {
     res.status(404).json({ error: "Session not found" });
   }
 });
 
-app.get("/mcp", async (req, res) => {
+app.get("/mcp", async (req: AuthenticatedRequest, res: Response) => {
   const authResult = await authenticateToken(req, res, null);
   if (!authResult.success) {
-    return authResult.response;
+    return;
   }
 
   req.auth = authResult.authObject;
 
   const transport = new SSEServerTransport("/messages", res);
 
-  transports[transport.sessionId] = transport;
+  transports[(transport as any).sessionId] = transport;
 
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Accel-Buffering", "no");
-  res.setHeader("Mcp-Session-Id", transport.sessionId);
+  res.setHeader("Mcp-Session-Id", (transport as any).sessionId);
 
   try {
-    await mcpServer.connect(transport, { auth: req.auth });
+    await mcpServer.connect(transport);
   } catch (error) {
     console.error("SSE connection error:", error);
     if (!res.headersSent) {
@@ -705,60 +692,69 @@ app.get("/mcp", async (req, res) => {
       res.end();
     }
 
-    if (transports[transport.sessionId]) {
-      delete transports[transport.sessionId];
+    if (transports[(transport as any).sessionId]) {
+      delete transports[(transport as any).sessionId];
     }
   }
 });
 
-app.post("/messages", express.json(), async (req, res) => {
-  const sessionId = req.query.sessionId;
-  const body = req.body;
-  const rpcId = body && body.id !== undefined ? body.id : null;
+app.post(
+  "/messages",
+  express.json(),
+  async (req: AuthenticatedRequest, res: Response) => {
+    const sessionId = req.query.sessionId;
+    const body = req.body;
+    const rpcId = body && body.id !== undefined ? body.id : null;
 
-  const authResult = await authenticateToken(req, res, rpcId);
-  if (!authResult.success) {
-    return authResult.response;
-  }
+    const authResult = await authenticateToken(req, res, rpcId);
+    if (!authResult.success) {
+      return;
+    }
 
-  req.auth = authResult.authObject;
+    req.auth = authResult.authObject;
 
-  if (!sessionId) {
-    return res.status(400).json({
-      jsonrpc: "2.0",
-      error: { code: -32000, message: "Missing sessionId in query parameters" },
-      id: rpcId,
-    });
-  }
-
-  const transport = transports[sessionId];
-
-  if (!transport || !(transport instanceof SSEServerTransport)) {
-    return res.status(404).json({
-      jsonrpc: "2.0",
-      error: {
-        code: -32001,
-        message: "Session not found or not an SSE session",
-      },
-      id: rpcId,
-    });
-  }
-
-  try {
-    await transport.handlePostMessage(req, res, body);
-  } catch (error) {
-    if (!res.headersSent) {
-      res.status(500).json({
+    if (!sessionId) {
+      res.status(400).json({
         jsonrpc: "2.0",
         error: {
-          code: -32603,
-          message: "Internal server error handling message",
+          code: -32000,
+          message: "Missing sessionId in query parameters",
         },
         id: rpcId,
       });
+      return;
+    }
+
+    const transport = transports[sessionId as string];
+
+    if (!transport || !(transport instanceof SSEServerTransport)) {
+      res.status(404).json({
+        jsonrpc: "2.0",
+        error: {
+          code: -32001,
+          message: "Session not found or not an SSE session",
+        },
+        id: rpcId,
+      });
+      return;
+    }
+
+    try {
+      await transport.handlePostMessage(req, res, body);
+    } catch (error) {
+      if (!res.headersSent) {
+        res.status(500).json({
+          jsonrpc: "2.0",
+          error: {
+            code: -32603,
+            message: "Internal server error handling message",
+          },
+          id: rpcId,
+        });
+      }
     }
   }
-});
+);
 
 app.listen(port, () => {
   console.log(`Remember The Milk MCP server running on port ${port}`);
@@ -767,26 +763,13 @@ app.listen(port, () => {
 });
 
 if (process.argv.includes("--stdio")) {
-  const server = new Server(
-    {
-      name: "remember-the-milk",
-      version: "1.0.0",
-    },
-    {
-      capabilities: {
-        tools: {},
-      },
-    }
-  );
-
-  const rtmApi = new RememberTheMilkAPI({
-    apiKey: process.env.RTM_API_KEY || "",
-    sharedSecret: process.env.RTM_SHARED_SECRET || "",
-    authToken: process.env.RTM_AUTH_TOKEN,
+  const stdioServer = new McpServer({
+    name: "remember-the-milk",
+    version: "1.0.0",
   });
 
-  registerTools(server);
+  registerRTMTools(stdioServer);
 
   const transport = new StdioServerTransport();
-  server.connect(transport).catch(console.error);
+  stdioServer.connect(transport).catch(console.error);
 }

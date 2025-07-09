@@ -1,3 +1,9 @@
 {
-  "cSpell.words": ["frob", "moopilot", "taskseries"]
+  "cSpell.words": [
+    "frob",
+    "modelcontextprotocol",
+    "moopilot",
+    "onsessioninitialized",
+    "taskseries"
+  ]
 }

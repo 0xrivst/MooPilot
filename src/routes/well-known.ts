@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 */
 
 import { Router } from "express";
-import { getBaseUrl } from "../util";
+import { getBaseUrl } from "../util.js";
 
 const router: Router = Router();
 
